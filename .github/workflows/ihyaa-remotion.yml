@@ -1,0 +1,78 @@
+name: Ihyaa film - silent Remotion render
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ihyaa-remotion-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        scene: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Prepare supplied film and approved footage
+        env:
+          IHYAA_SOURCE_URL: ${{ secrets.IHYAA_SOURCE_URL }}
+          IHYAA_MEDIA_URLS: ${{ secrets.IHYAA_MEDIA_URLS }}
+        run: python3 ihyaa-film/prepare.py
+      - name: Install locked dependencies
+        working-directory: ihyaa-film/project
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck film
+        working-directory: ihyaa-film/project
+        run: npm run typecheck
+      - name: Render a silent Full HD scene
+        working-directory: ihyaa-film/project
+        env:
+          SCENE_NUMBER: ${{ matrix.scene }}
+        run: |
+          mkdir -p out
+          filename=$(printf 'scene-%02d.mp4' "$SCENE_NUMBER")
+          npx remotion render "Scene$SCENE_NUMBER" "out/$filename" --props=silent-props.json --muted --gl=swangle --concurrency=2 --codec=h264 --crf=20
+      - name: Verify scene has no audio
+        working-directory: ihyaa-film/project
+        env:
+          SCENE_NUMBER: ${{ matrix.scene }}
+        run: |
+          filename=$(printf 'scene-%02d.mp4' "$SCENE_NUMBER")
+          test -z "$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "out/$filename")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ihyaa-scene-${{ matrix.scene }}
+          path: ihyaa-film/project/out/scene-*.mp4
+          if-no-files-found: error
+          retention-days: 14
+  assemble:
+    needs: render
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ihyaa-scene-*
+          path: rendered-scenes
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Assemble and verify all ten scenes
+        run: python3 ihyaa-film/assemble.py rendered-scenes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ihyaa-film-silent-fullhd
+          path: |
+            rendered-scenes/ihyaa-film-silent-fullhd.mp4
+            rendered-scenes/verification.json
+          if-no-files-found: error
+          retention-days: 14
